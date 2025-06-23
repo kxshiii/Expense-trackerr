@@ -7,6 +7,7 @@ DELETE /transactions/<id>  # Delete transaction
 GET /transactions/summary  # Get monthly summary using Transaction.get_monthly_summary()
 GET /transactions/category-summary  # Get summary by category
 GET /transactions/search  # Search transactions by description or category
+GET /transactions/statistics  # Get transaction statistics
 
 # /api/budget-goals
 GET /budget-goals  # Get all user budget goals
@@ -258,6 +259,127 @@ def search_transactions():
         'transaction_type': t.transaction_type,
         'date': t.date.isoformat()
     } for t in transactions])
+
+@transaction_bp.route('/statistics', methods=['GET'])
+@jwt_required()
+def get_transaction_statistics():
+    user_id = get_jwt_identity()
+    
+    # Get time period from query params
+    period = request.args.get('period', 'month')  # 'week', 'month', 'year'
+    
+    # Calculate date range
+    end_date = datetime.now()
+    if period == 'week':
+        start_date = end_date - relativedelta(weeks=1)
+    elif period == 'month':
+        start_date = end_date - relativedelta(months=1)
+    else:
+        start_date = end_date - relativedelta(years=1)
+    
+    transactions = Transaction.query.filter(
+        Transaction.user_id == user_id,
+        Transaction.date.between(start_date, end_date)
+    ).all()
+    
+    return jsonify({
+        'total_transactions': len(transactions),
+        'average_amount': sum(t.amount for t in transactions) / len(transactions) if transactions else 0,
+        'most_common_category': max(set(t.category for t in transactions), key=lambda x: sum(1 for t in transactions if t.category == x)) if transactions else None,
+        'period': period
+    })
+
+@transaction_bp.route('/bulk', methods=['POST'])
+@jwt_required()
+def bulk_create_transactions():
+    user_id = get_jwt_identity()
+    transactions_data = request.get_json()
+    
+    if not isinstance(transactions_data, list):
+        return jsonify({'error': 'Expected a list of transactions'}), 400
+    
+    created_transactions = []
+    for data in transactions_data:
+        errors = transaction_schema.validate(data)
+        if errors:
+            return jsonify({'errors': errors, 'at_index': len(created_transactions)}), 400
+            
+        transaction = Transaction(
+            user_id=user_id,
+            amount=data['amount'],
+            description=data.get('description'),
+            category=data.get('category'),
+            transaction_type=data['transaction_type']
+        )
+        created_transactions.append(transaction)
+    
+    db.session.bulk_save_objects(created_transactions)
+    db.session.commit()
+    
+    return jsonify({
+        'message': f'Successfully created {len(created_transactions)} transactions',
+        'count': len(created_transactions)
+    }), 201
+
+@transaction_bp.route('/categories', methods=['GET'])
+@jwt_required()
+def get_categories():
+    user_id = get_jwt_identity()
+    
+    # Get unique categories for user
+    categories = db.session.query(Transaction.category)\
+        .filter_by(user_id=user_id)\
+        .distinct()\
+        .all()
+    
+    return jsonify({
+        'categories': [category[0] for category in categories]
+    })
+
+@transaction_bp.route('/report', methods=['GET'])
+@jwt_required()
+def generate_report():
+    user_id = get_jwt_identity()
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+    
+    query = Transaction.query.filter_by(user_id=user_id)
+    
+    if start_date:
+        query = query.filter(Transaction.date >= datetime.strptime(start_date, '%Y-%m-%d'))
+    if end_date:
+        query = query.filter(Transaction.date <= datetime.strptime(end_date, '%Y-%m-%d'))
+    
+    transactions = query.all()
+    
+    report = {
+        'period': {
+            'start': start_date,
+            'end': end_date
+        },
+        'summary': {
+            'total_income': sum(t.amount for t in transactions if t.transaction_type == 'income'),
+            'total_expenses': sum(t.amount for t in transactions if t.transaction_type == 'expense'),
+            'transaction_count': len(transactions)
+        },
+        'category_breakdown': {},
+        'monthly_totals': {}
+    }
+    
+    # Add category breakdown
+    for t in transactions:
+        if t.category not in report['category_breakdown']:
+            report['category_breakdown'][t.category] = 0
+        report['category_breakdown'][t.category] += t.amount
+    
+    # Add monthly totals
+    for t in transactions:
+        month_key = t.date.strftime('%Y-%m')
+        if month_key not in report['monthly_totals']:
+            report['monthly_totals'][month_key] = 0
+        report['monthly_totals'][month_key] += t.amount
+    
+    return jsonify(report)
 
 @transaction_bp.errorhandler(Exception)
 def handle_error(error):
