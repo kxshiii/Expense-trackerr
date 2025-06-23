@@ -39,10 +39,15 @@ logger = logging.getLogger(__name__)
 
 transaction_bp = Blueprint('transactions', __name__)
 
+VALID_CATEGORIES = [
+    'food', 'transport', 'utilities', 'entertainment', 
+    'healthcare', 'shopping', 'housing', 'other'
+]
+
 class TransactionSchema(Schema):
     amount = fields.Float(required=True, validate=validate.Range(min=0.01))
     description = fields.Str(required=True)
-    category = fields.Str(required=True)
+    category = fields.Str(required=True, validate=validate.OneOf(VALID_CATEGORIES))
     transaction_type = fields.Str(validate=validate.OneOf(['income', 'expense']))
     is_recurring = fields.Boolean()
     recurring_interval = fields.Str(validate=validate.OneOf(['daily', 'weekly', 'monthly', 'yearly']))
@@ -76,51 +81,59 @@ def handle_recurring_transaction(transaction):
         )
         db.session.add(next_transaction)
 
+def validate_date_range(start_date, end_date):
+    """Validate date range for transaction queries"""
+    try:
+        if start_date:
+            start = datetime.strptime(start_date, '%Y-%m-%d')
+        if end_date:
+            end = datetime.strptime(end_date, '%Y-%m-%d')
+            if start_date and start > end:
+                return False, "Start date cannot be after end date"
+        return True, None
+    except ValueError:
+        return False, "Invalid date format. Use YYYY-MM-DD"
+
+def paginate_query(query, page=1, per_page=10):
+    """Helper function to handle pagination"""
+    try:
+        page = max(1, int(page))
+        per_page = min(100, max(1, int(per_page)))
+    except (TypeError, ValueError):
+        page = 1
+        per_page = 10
+    
+    return query.paginate(page=page, per_page=per_page, error_out=False)
+
+def format_transaction_response(transaction):
+    """Helper function to format transaction response"""
+    return {
+        'id': transaction.id,
+        'amount': float(transaction.amount),
+        'description': transaction.description,
+        'category': transaction.category,
+        'transaction_type': transaction.transaction_type,
+        'date': transaction.date.isoformat(),
+        'is_recurring': transaction.is_recurring,
+        'recurring_interval': transaction.recurring_interval
+    }
+
 @transaction_bp.route('/', methods=['GET'])
 @jwt_required()
 def get_transactions():
     user_id = get_jwt_identity()
-    
-    # Pagination parameters
-    page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 10, type=int)
-    
-    # Get query parameters for filtering
-    category = request.args.get('category')
-    start_date = request.args.get('start_date')
-    end_date = request.args.get('end_date')
-    transaction_type = request.args.get('type')
-    
-    # Base query
     query = Transaction.query.filter_by(user_id=user_id)
     
-    # Apply filters
-    if category:
-        query = query.filter_by(category=category)
-    if transaction_type:
-        query = query.filter_by(transaction_type=transaction_type)
-    if start_date:
-        query = query.filter(Transaction.date >= datetime.strptime(start_date, '%Y-%m-%d'))
-    if end_date:
-        query = query.filter(Transaction.date <= datetime.strptime(end_date, '%Y-%m-%d'))
-    
-    # Add pagination
-    paginated_transactions = query.paginate(page=page, per_page=per_page, error_out=False)
+    # Apply filters and pagination
+    paginated = paginate_query(query, 
+                             request.args.get('page'), 
+                             request.args.get('per_page'))
     
     return jsonify({
-        'transactions': [{
-            'id': t.id,
-            'amount': t.amount,
-            'description': t.description,
-            'category': t.category,
-            'transaction_type': t.transaction_type,
-            'date': t.date.isoformat(),
-            'is_recurring': t.is_recurring,
-            'recurring_interval': t.recurring_interval
-        } for t in paginated_transactions.items],
-        'total': paginated_transactions.total,
-        'pages': paginated_transactions.pages,
-        'current_page': page
+        'transactions': [format_transaction_response(t) for t in paginated.items],
+        'total': paginated.total,
+        'pages': paginated.pages,
+        'current_page': paginated.page
     })
 
 @transaction_bp.route('/', methods=['POST'])
@@ -160,16 +173,7 @@ def get_transaction(id):
     user_id = get_jwt_identity()
     transaction = Transaction.query.filter_by(id=id, user_id=user_id).first_or_404()
     
-    return jsonify({
-        'id': transaction.id,
-        'amount': transaction.amount,
-        'description': transaction.description,
-        'category': transaction.category,
-        'transaction_type': transaction.transaction_type,
-        'date': transaction.date.isoformat(),
-        'is_recurring': transaction.is_recurring,
-        'recurring_interval': transaction.recurring_interval
-    })
+    return jsonify(format_transaction_response(transaction))
 
 @transaction_bp.route('/<int:id>', methods=['PUT'])
 @jwt_required()
@@ -251,14 +255,7 @@ def search_transactions():
         )
     
     transactions = query.all()
-    return jsonify([{
-        'id': t.id,
-        'amount': t.amount,
-        'description': t.description,
-        'category': t.category,
-        'transaction_type': t.transaction_type,
-        'date': t.date.isoformat()
-    } for t in transactions])
+    return jsonify([format_transaction_response(t) for t in transactions])
 
 @transaction_bp.route('/statistics', methods=['GET'])
 @jwt_required()
@@ -342,6 +339,11 @@ def generate_report():
     user_id = get_jwt_identity()
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
+    
+    # Validate date range
+    is_valid, error = validate_date_range(start_date, end_date)
+    if not is_valid:
+        return jsonify({'error': error}), 400
     
     query = Transaction.query.filter_by(user_id=user_id)
     
