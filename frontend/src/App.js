@@ -1,10 +1,13 @@
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { Container, CssBaseline, Box, Typography } from '@mui/material';
+
+import Home from './Pages/Home';
 import Login from './Pages/Login';
 import SignUp from './Pages/SignUp';
-import Dashboard from './Pages/Dashboard'; // <-- you'll create this page
-import { AuthProvider } from './context/AuthContext'; // <-- wrap the app with AuthProvider
-import PrivateRoute from './components/PrivateRoute'; // <-- protect private routes
+import Dashboard from './Pages/Dashboard';
+
+import { AuthProvider } from './context/AuthContext';
+import PrivateRoute from './components/PrivateRoute';
 
 function App() {
   return (
@@ -18,6 +21,7 @@ function App() {
             </Typography>
 
             <Routes>
+              <Route path="/" element={<Home />} />
               <Route path="/signup" element={<SignUp />} />
               <Route path="/login" element={<Login />} />
               <Route
